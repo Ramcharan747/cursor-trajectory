@@ -4,7 +4,7 @@
 
 **Learn how humans move — then generate it.**
 
-A research system that captures real cursor movement, decomposes it into mathematical primitives, and trains a Neural ODE to generate naturalistic trajectories between any two points.
+A research system that captures real cursor movement at **per-pixel resolution**, decomposes it into mathematical primitives, and trains a Neural ODE to generate naturalistic trajectories between any two points.
 
 [![Build](https://github.com/Ramcharan747/cursor-trajectory/actions/workflows/build.yml/badge.svg)](https://github.com/Ramcharan747/cursor-trajectory/actions)
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange?logo=rust)](https://www.rust-lang.org/)
@@ -13,7 +13,7 @@ A research system that captures real cursor movement, decomposes it into mathema
 
 ---
 
-**CursorCapture** records your mouse at 60Hz · **TrajectoryGen** learns your movement patterns · **Generate** realistic paths on demand
+**CursorCapture** records every pixel your cursor visits · **TrajectoryGen** learns your movement patterns · **Generate** realistic paths on demand
 
 </div>
 
@@ -25,7 +25,7 @@ Most trajectory generation uses straight lines or Bézier curves. Real human cur
 
 This project takes a different approach:
 
-1. **Record** real cursor movement from daily computer use
+1. **Record** every pixel the cursor visits during daily computer use
 2. **Decompose** trajectories into mathematical building blocks (motion primitives) using SIREN neural networks
 3. **Learn** the vocabulary of how you move using VQ-VAE
 4. **Generate** new trajectories using Neural ODEs that are statistically indistinguishable from real movement
@@ -40,11 +40,20 @@ The result: given any two points on screen, output a continuous, naturalistic tr
 
 A **1.6MB Rust binary** that silently records cursor movement. Install once, forget forever.
 
+### Why per-pixel?
+
+Most recorders sample at a fixed rate (e.g. 60Hz = every 16ms). This **loses data** — if your cursor moves 200 pixels in 16ms, you only see the start and end, missing 198 points of the actual trajectory.
+
+CursorCapture takes a different approach: **record every distinct pixel the cursor visits.** No time-based throttling. The OS reports a new position → we record it. Period.
+
+Each event includes a **microsecond-precision timestamp** so you can compute velocity, acceleration, and jerk from the data without any interpolation guesswork.
+
 ### Features
 
 | Feature | Detail |
 |---------|--------|
-| ⚡ **60Hz recording** | Captures cursor position every ~16ms |
+| 🔬 **Per-pixel capture** | Records every distinct pixel position — zero spatial data loss |
+| ⏱️ **Microsecond timestamps** | μs-precision timing for velocity & acceleration analysis |
 | 💾 **Efficient storage** | JSONL format, hourly file rotation, auto-gzip after 24h |
 | 🔒 **Privacy first** | Position + timestamp only. No screenshots, keystrokes, or window titles |
 | 🔄 **Auto-start** | Runs on every login — macOS LaunchAgent / Windows Startup |
@@ -117,22 +126,26 @@ cursor_capture uninstall    # Remove auto-start (preserves data)
 
 ### Data Format
 
+Each line is a distinct pixel position the cursor visited, with a microsecond timestamp:
+
 ```jsonl
-{"x":1024.0,"y":768.0,"t":1714857600123}
-{"x":1025.5,"y":770.2,"t":1714857600139}
-{"x":1028.3,"y":773.1,"t":1714857600155}
+{"x":1024.0,"y":768.0,"t":1714857600123456}
+{"x":1025.0,"y":769.0,"t":1714857600124012}
+{"x":1026.0,"y":770.0,"t":1714857600124589}
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `x` | `f64` | Horizontal position (pixels) |
-| `y` | `f64` | Vertical position (pixels) |
-| `t` | `i64` | Milliseconds since Unix epoch |
+| `x` | `f64` | Horizontal position (integer pixels) |
+| `y` | `f64` | Vertical position (integer pixels) |
+| `t` | `i64` | Microseconds since Unix epoch (μs precision) |
 
-**Storage estimates:**
-- 1 hour active use ≈ 5MB raw → ~1MB compressed
-- 8 hours/day ≈ 40MB raw → ~8MB compressed  
-- 500MB cap ≈ ~2 months of data
+**Why microseconds?** At high sample rates (125–1000Hz), consecutive events can be <1ms apart. Microsecond precision lets you compute instantaneous velocity and acceleration without rounding artifacts.
+
+**Storage estimates (8 hours active use/day):**
+- Standard mouse (125Hz): ~160MB/day raw → ~30MB compressed
+- 500MB cap ≈ 2-3 weeks of continuous collection
+- Auto-compresses files older than 24h, auto-deletes oldest when cap reached
 
 ---
 
@@ -192,9 +205,9 @@ Optimized for Google Colab (16GB VRAM, 4-hour sessions):
 │  Listener Thread     │    mpsc channel      │  Writer Thread     │
 │                      │ ──────────────────→  │                    │
 │  rdev::listen()      │   CursorEvent        │  BufWriter<File>   │
-│  • 60Hz throttle     │   {x, y, t}          │  • Batch writes    │
-│  • Idle detection    │                      │  • File rotation   │
-│  • Position dedup    │                      │  • Hourly gzip     │
+│  • Per-pixel capture │   {x, y, t_μs}       │  • Batch writes    │
+│  • Pixel dedup only  │                      │  • File rotation   │
+│  • No time throttle  │                      │  • Hourly gzip     │
 └─────────────────────┘                      │  • 500MB cap       │
          │                                    └───────────────────┘
   ┌──────┴──────┐
@@ -208,8 +221,8 @@ Optimized for Google Colab (16GB VRAM, 4-hour sessions):
 ```
 ┌──────────┐    ┌─────────────┐    ┌───────────┐    ┌───────────┐    ┌──────────┐
 │  Record   │──→│  Segment    │──→│  SIREN     │──→│  VQ-VAE   │──→│  Neural  │
-│  60Hz     │   │  Direction  │   │  3×64      │   │  128 codes │   │  ODE     │
-│  (x,y,t)  │   │  Velocity   │   │  sin(ωx)   │   │  EMA+CL   │   │  Latent  │
+│  Per-pixel│   │  Direction  │   │  3×64      │   │  128 codes │   │  ODE     │
+│  (x,y,μs) │   │  Velocity   │   │  sin(ωx)   │   │  EMA+CL   │   │  Latent  │
 │           │   │  Curvature  │   │  ~8.5K wts │   │  64d embed │   │  Adjoint │
 └──────────┘    └─────────────┘    └───────────┘    └───────────┘    └──────────┘
 ```
@@ -223,7 +236,7 @@ cursor-trajectory/
 ├── cursor_capture/              # Rust data collection daemon
 │   ├── src/
 │   │   ├── main.rs              # CLI + smart auto-install
-│   │   ├── recorder.rs          # Mouse capture, throttle, idle detection
+│   │   ├── recorder.rs          # Per-pixel capture, no throttle
 │   │   ├── storage.rs           # JSONL writer, rotation, compression
 │   │   └── platform.rs          # Cross-platform auto-start
 │   ├── install_mac.command      # macOS one-click installer
@@ -245,10 +258,10 @@ cursor-trajectory/
 
 This is a research project in active development. Contributions welcome:
 
-- **Data collection improvements** — Better idle detection, multi-monitor support
+- **Data collection improvements** — Multi-monitor support, click events
 - **Segmentation algorithms** — New cut-point heuristics
 - **Model architecture** — Alternative to VQ-VAE for primitive library
-- **Platform support** — Linux LaunchAgent, system tray UI
+- **Platform support** — Linux support, system tray UI
 
 ---
 

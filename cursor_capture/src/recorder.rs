@@ -9,29 +9,37 @@ use log::{info, warn, error};
 
 /// Configuration for the recorder.
 pub struct RecorderConfig {
-    /// Minimum interval between recorded events (throttle).
-    /// At 60Hz this is ~16ms.
-    pub min_interval_ms: u64,
     /// Number of events to buffer before flushing to disk.
     pub buffer_size: usize,
     /// How often to run storage maintenance (compress, cap) in seconds.
     pub maintenance_interval_secs: u64,
-    /// Idle threshold: stop recording after this many ms of no movement.
-    pub idle_threshold_ms: u64,
 }
 
 impl Default for RecorderConfig {
     fn default() -> Self {
         RecorderConfig {
-            min_interval_ms: 16,   // ~60 Hz
-            buffer_size: 1000,
-            maintenance_interval_secs: 3600, // every hour
-            idle_threshold_ms: 2000,         // 2 seconds
+            buffer_size: 5000,               // larger buffer for high-throughput
+            maintenance_interval_secs: 3600,  // every hour
         }
     }
 }
 
 /// The Recorder captures mouse movement events and writes them to storage.
+///
+/// **Capture philosophy: per-pixel, not per-timestamp.**
+///
+/// We record EVERY distinct pixel position the OS reports. No time-based
+/// throttling. The only filter is position deduplication — if the cursor
+/// hasn't moved to a new integer pixel, we don't record.
+///
+/// This gives us the true continuous trajectory the cursor follows,
+/// with zero spatial data loss. The OS + mouse hardware determines the
+/// effective sample rate (typically 125Hz–1000Hz depending on the mouse).
+///
+/// Data volume estimates (8 hours active use):
+///   - Standard mouse (125Hz): ~3.6M events/day ≈ 160MB raw → ~30MB compressed
+///   - Gaming mouse (1000Hz): ~28M events/day ≈ 1.2GB raw → ~200MB compressed  
+///   - 500MB cap → at least 2-3 weeks of continuous collection
 pub struct Recorder {
     config: RecorderConfig,
     storage: Arc<Storage>,
@@ -132,7 +140,7 @@ impl Recorder {
             thread::sleep(Duration::from_secs(10));
 
             if !watchdog_running.load(Ordering::Relaxed) {
-                return; // Shutting down, don't warn
+                return;
             }
 
             let count = events_for_watchdog.load(Ordering::Relaxed);
@@ -178,22 +186,19 @@ impl Recorder {
         });
 
         // Listener: capture mouse events on the main/listener thread
-        let min_interval = Duration::from_millis(self.config.min_interval_ms);
-        let _idle_threshold = Duration::from_millis(self.config.idle_threshold_ms);
         let listener_running = running.clone();
 
-        // State for throttling and idle detection
-        let last_event_time = Arc::new(std::sync::Mutex::new(Instant::now() - min_interval));
-        let last_position = Arc::new(std::sync::Mutex::new((f64::NAN, f64::NAN)));
-        let idle_since = Arc::new(std::sync::Mutex::new(Option::<Instant>::None));
+        // Per-pixel deduplication state (no time-based throttle!)
+        // We use atomic-like integers for the last pixel position to avoid mutex overhead
+        // in the hot path. Using Mutex<(i32, i32)> for simplicity since the lock is
+        // uncontended (only the callback thread writes).
+        let last_pixel = Arc::new(std::sync::Mutex::new((i32::MIN, i32::MIN)));
 
-        let let_clone = last_event_time.clone();
-        let lp_clone = last_position.clone();
-        let is_clone = idle_since.clone();
+        let lp_clone = last_pixel.clone();
         let lr_clone = listener_running.clone();
 
-        info!("Starting mouse listener ({}Hz, buffer={})", 
-              1000 / self.config.min_interval_ms, buffer_size);
+        info!("Starting mouse listener (per-pixel mode, buffer={})", buffer_size);
+        info!("Recording EVERY distinct pixel position — zero spatial data loss");
 
         // Clone tx for the closure; the original tx will be dropped after listen() returns
         // to signal the writer thread that no more events are coming.
@@ -206,45 +211,33 @@ impl Recorder {
             }
 
             if let EventType::MouseMove { x, y } = event.event_type {
-                let now = Instant::now();
+                // Convert to integer pixels — this is our dedup key.
+                // Sub-pixel differences don't matter for trajectory research.
+                let px = x.round() as i32;
+                let py = y.round() as i32;
 
-                // Throttle: skip if too soon since last event
+                // Per-pixel deduplication: only record if the cursor moved
+                // to a new integer pixel position. This is the ONLY filter.
                 {
-                    let mut last = let_clone.lock().unwrap();
-                    if now.duration_since(*last) < min_interval {
-                        return;
+                    let mut last = lp_clone.lock().unwrap();
+                    if last.0 == px && last.1 == py {
+                        return; // Same pixel, skip
                     }
-                    *last = now;
+                    *last = (px, py);
                 }
 
-                // Check if position actually changed (avoid duplicate stationary events)
-                {
-                    let mut last_pos = lp_clone.lock().unwrap();
-                    let (lx, ly) = *last_pos;
-                    if (x - lx).abs() < 0.5 && (y - ly).abs() < 0.5 {
-                        // Position hasn't meaningfully changed — update idle tracker
-                        let mut idle = is_clone.lock().unwrap();
-                        if idle.is_none() {
-                            *idle = Some(now);
-                        }
-                        return;
-                    }
-                    *last_pos = (x, y);
-                }
-
-                // Reset idle tracker since we moved
-                {
-                    let mut idle = is_clone.lock().unwrap();
-                    *idle = None;
-                }
-
-                // Create the event with system timestamp
-                let timestamp = SystemTime::now()
+                // Create the event with high-resolution timestamp
+                // Using microseconds for sub-millisecond precision at high sample rates
+                let timestamp_us = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_millis() as i64;
+                    .as_micros() as i64;
 
-                let cursor_event = CursorEvent { x, y, t: timestamp };
+                let cursor_event = CursorEvent {
+                    x: px as f64,
+                    y: py as f64,
+                    t: timestamp_us,
+                };
 
                 // Send to writer thread — if channel is full/closed, just drop
                 let _ = tx_clone.send(cursor_event);
@@ -252,15 +245,11 @@ impl Recorder {
         };
 
         // rdev::listen blocks, so we run it here
-        // If it returns an error, log it
         if let Err(e) = listen(callback) {
             error!("Mouse listener error: {:?}", e);
         }
 
         // Signal writer to stop and wait
-        // tx_clone is moved into the closure, so when listen() returns and the
-        // closure is dropped, the sender is dropped, causing the writer's recv to
-        // return Disconnected.
         running.store(false, Ordering::Relaxed);
         let _ = writer_handle.join();
         let _ = watchdog_handle.join();

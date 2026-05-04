@@ -9,11 +9,16 @@ use flate2::Compression;
 use log::{info, warn, error};
 
 /// A single cursor event ready for serialization.
+///
+/// Each event represents a distinct pixel position the cursor visited.
+/// Timestamps are in microseconds for sub-millisecond precision.
 #[derive(Serialize, Clone, Debug)]
 pub struct CursorEvent {
+    /// Horizontal position in screen pixels (integer, stored as f64 for JSON compat)
     pub x: f64,
+    /// Vertical position in screen pixels (integer, stored as f64 for JSON compat)
     pub y: f64,
-    /// Milliseconds since Unix epoch
+    /// Microseconds since Unix epoch (μs precision for high sample rates)
     pub t: i64,
 }
 
@@ -108,7 +113,7 @@ impl Storage {
                 .expect("Failed to open data file");
 
             *file_guard = Some(CurrentFile {
-                writer: BufWriter::with_capacity(64 * 1024, file),
+                writer: BufWriter::with_capacity(256 * 1024, file), // 256KB buffer for high throughput
                 hour_key: current_hour,
                 events_written: 0,
             });
