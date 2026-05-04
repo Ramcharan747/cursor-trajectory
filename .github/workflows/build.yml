@@ -1,0 +1,86 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        working-directory: cursor_capture
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp cursor_capture/target/${{ matrix.target }}/release/cursor_capture dist/
+          cp cursor_capture/install_mac.command dist/
+          chmod +x dist/install_mac.command dist/cursor_capture
+          cd dist && tar -czf ../cursor_capture-macos-${{ matrix.target }}.tar.gz .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cursor_capture-macos-${{ matrix.target }}
+          path: cursor_capture-macos-${{ matrix.target }}.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+        working-directory: cursor_capture
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item cursor_capture/target/release/cursor_capture.exe dist/
+          Copy-Item cursor_capture/install_win.bat dist/
+          Compress-Archive -Path dist/* -DestinationPath cursor_capture-windows-x86_64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cursor_capture-windows-x86_64
+          path: cursor_capture-windows-x86_64.zip
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cursor_capture-macos-x86_64-apple-darwin/cursor_capture-macos-x86_64-apple-darwin.tar.gz
+            cursor_capture-macos-aarch64-apple-darwin/cursor_capture-macos-aarch64-apple-darwin.tar.gz
+            cursor_capture-windows-x86_64/cursor_capture-windows-x86_64.zip
+          generate_release_notes: true
+          draft: false

@@ -1,0 +1,22 @@
+# Build artifacts
+cursor_capture/target/
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data files (don't commit recorded data)
+cursor_capture_data/
+*.jsonl
+*.jsonl.gz
+
+# Logs
+*.log

@@ -1,0 +1,24 @@
+[package]
+name = "cursor_capture"
+version = "0.1.0"
+edition = "2021"
+description = "Silent cursor movement recorder for trajectory research"
+
+[dependencies]
+rdev = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+flate2 = "1"
+dirs = "5"
+ctrlc = "3"
+auto-launch = "0.5"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
