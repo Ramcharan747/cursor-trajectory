@@ -1,0 +1,19 @@
+# TrajectoryGen — ML Pipeline Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+torch>=2.0.0
+numpy>=1.24.0
+
+# ODE Solvers (Neural ODE / Latent ODE)
+torchdiffeq>=0.2.3
+
+# Data & Visualization
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# Checkpointing
+huggingface_hub>=0.16.0
+
+# Optional: Colab utilities
+# google-colab (pre-installed in Colab)

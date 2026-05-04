@@ -20,3 +20,5 @@ cursor_capture_data/
 
 # Logs
 *.log
+__pycache__/
+*.pyc
