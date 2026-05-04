@@ -41,8 +41,9 @@ class ODEFunc(nn.Module):
     Rubanova et al.: "used time-invariant dynamics dh(t)/dt = f_θ(h(t))"
     
     Tanh activations per supplement Section 4 recommendation.
+    Scaled: 4 layers × 512 hidden for VRAM target.
     """
-    def __init__(self, latent_dim: int, hidden_dim: int = 128, num_layers: int = 3):
+    def __init__(self, latent_dim: int, hidden_dim: int = 512, num_layers: int = 4):
         super().__init__()
         layers = [nn.Linear(latent_dim, hidden_dim), nn.Tanh()]
         for _ in range(num_layers - 2):
@@ -193,10 +194,10 @@ class LatentODE(nn.Module):
     """
     def __init__(
         self,
-        input_dim: int = 64,
-        latent_dim: int = 16,
-        rec_hidden_dim: int = 32,
-        gen_hidden_dim: int = 128,
+        input_dim: int = 256,
+        latent_dim: int = 64,
+        rec_hidden_dim: int = 256,
+        gen_hidden_dim: int = 512,
         output_dim: Optional[int] = None,
         use_adjoint: bool = True,
     ):

@@ -6,9 +6,11 @@ Paper: "Neural Discrete Representation Learning"
        DeepMind — arXiv:1711.00937
 
 Purpose in our pipeline:
-    Compress SIREN weight vectors (~8,642 dims) into a discrete codebook
-    of ~128 motion primitives. Each primitive is a reusable building block
+    Compress SIREN weight vectors (~12,738 dims) into a discrete codebook
+    of ~512 motion primitives. Each primitive is a reusable building block
     of cursor movement (arcs, lines, hooks, micro-corrections, etc.).
+
+    Scaled for 10-12GB VRAM target on Colab T4/A100.
 
 Key equations from paper:
 
@@ -189,12 +191,12 @@ class VQVAE(nn.Module):
     The encoder and decoder are simple MLPs since our "data" is
     already a 1D weight vector (not images/audio).
     
-    Architecture:
-        Encoder: 8642 → 512 → ReLU → 256 → ReLU → 64 (embedding_dim)
-        Codebook: 128 entries × 64 dims (with EMA updates, γ=0.99)
-        Decoder: 64 → 256 → ReLU → 512 → ReLU → 8642
+    Architecture (scaled for 10-12GB VRAM):
+        Encoder: 12738 → 2048 → ReLU → 1024 → ReLU → 512 → ReLU → 256
+        Codebook: 512 entries × 256 dims (with EMA updates, γ=0.99)
+        Decoder: 256 → 512 → ReLU → 1024 → ReLU → 2048 → ReLU → 12738
     
-    The codebook size K=128 gives us 128 distinct motion primitives —
+    The codebook size K=512 gives us 512 distinct motion primitives —
     the "vocabulary" of cursor movement.
     
     Args:
@@ -209,9 +211,9 @@ class VQVAE(nn.Module):
     def __init__(
         self,
         input_dim: int = 12738,
-        hidden_dim: int = 512,
-        embedding_dim: int = 64,
-        num_embeddings: int = 128,
+        hidden_dim: int = 2048,
+        embedding_dim: int = 256,
+        num_embeddings: int = 512,
         commitment_cost: float = 0.25,
         ema_decay: float = 0.99,
     ):
@@ -221,12 +223,15 @@ class VQVAE(nn.Module):
         self.num_embeddings = num_embeddings
 
         # Encoder: SIREN weights → continuous embedding
+        # Scaled architecture for VRAM utilization (~85M params)
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim, hidden_dim // 2),  # 2048 → 1024
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim // 2, embedding_dim),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),  # 1024 → 512
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim // 4, embedding_dim),  # 512 → 256
         )
 
         # Vector Quantizer with EMA updates
@@ -238,12 +243,15 @@ class VQVAE(nn.Module):
         )
 
         # Decoder: quantized embedding → reconstructed SIREN weights
+        # Mirror of encoder architecture
         self.decoder = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim // 2),
+            nn.Linear(embedding_dim, hidden_dim // 4),  # 256 → 512
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim // 2, hidden_dim),
+            nn.Linear(hidden_dim // 4, hidden_dim // 2),  # 512 → 1024
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, input_dim),
+            nn.Linear(hidden_dim // 2, hidden_dim),  # 1024 → 2048
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, input_dim),  # 2048 → 12738
         )
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:

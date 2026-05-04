@@ -211,9 +211,9 @@ Compresses SIREN weight vectors into a discrete codebook of motion primitives:
 
 | Parameter | Value | Source |
 |-----------|-------|--------|
-| Encoder | 12738 → 512 → ReLU → 256 → ReLU → 64 | — |
-| Codebook (K) | 128 entries × 64 dims | — |
-| Decoder | 64 → 256 → ReLU → 512 → ReLU → 12738 | — |
+| Encoder | 12738 → 2048 → ReLU → 1024 → ReLU → 512 → ReLU → 256 | — |
+| Codebook (K) | 512 entries × 256 dims | — |
+| Decoder | 256 → 512 → ReLU → 1024 → ReLU → 2048 → ReLU → 12738 | — |
 | Gradient | Straight-through estimator | Paper Section 3.2 |
 | Codebook updates | EMA, γ=0.99 | Appendix A.1, Eq. 6-8 |
 | Commitment cost (β) | 0.25 | Paper Section 3.2 |
@@ -235,9 +235,9 @@ Sequences motion primitives using continuous-time dynamics:
 | Parameter | Value | Source |
 |-----------|-------|--------|
 | Encoder | ODE-RNN (backwards in time) | Rubanova Eq. 8, Algorithm 1 |
-| Recognition dim | 32 (> latent dim) | Supplement Section 5 |
-| Latent dim | 16 | — |
-| ODE function | 3-layer MLP, **Tanh** activation | Supplement Section 4 |
+| Recognition dim | 256 (> latent dim) | Supplement Section 5 |
+| Latent dim | 64 | — |
+| ODE function | 4-layer MLP × 512 hidden, **Tanh** activation | Supplement Section 4 |
 | ODE solver | `dopri5` (adaptive RK 4/5) | Supplement Section 4 |
 | Tolerances | rtol=1e-3, atol=1e-4 | Supplement Section 4 |
 | Training | ELBO with KL annealing (coeff 0.99) | Supplement Section 6 |
@@ -254,6 +254,8 @@ Optimized for Google Colab (16GB VRAM, 4-hour sessions):
 - Checkpoints every 10 minutes (survives disconnects)
 - Mixed precision (fp16) for ~2× speedup on T4
 - Gradient accumulation (4 steps) for larger effective batch
+- VQ-VAE: batch 4096, effective 16384 with grad accumulation (~3-4GB)
+- Latent ODE: batch 256, seq_len 20, adjoint method (~10-12GB)
 - Precomputed SIREN weight vectors (no redundant INR fitting during training)
 - Checkpoint storage on HuggingFace Hub
 
@@ -284,9 +286,9 @@ Optimized for Google Colab (16GB VRAM, 4-hour sessions):
 ```
 ┌──────────┐    ┌─────────────┐    ┌───────────┐    ┌───────────┐    ┌──────────┐
 │  Record   │──→│  Segment    │──→│  SIREN     │──→│  VQ-VAE   │──→│  Latent  │
-│  Per-pixel│   │  Direction  │   │  3×64      │   │  128 codes │   │  ODE     │
+│  Per-pixel│   │  Direction  │   │  3×64      │   │  512 codes │   │  Latent  │
 │  (x,y,μs) │   │  Velocity   │   │  sin(ω₀x)  │   │  EMA+CL   │   │  ODE-RNN │
-│           │   │  Curvature  │   │ ~12.7K wts │   │  64d embed │   │  Adjoint │
+│           │   │  Curvature  │   │ ~12.7K wts │   │ 256d embed │   │  Adjoint │
 └──────────┘    └─────────────┘    └───────────┘    └───────────┘    └──────────┘
 ```
 

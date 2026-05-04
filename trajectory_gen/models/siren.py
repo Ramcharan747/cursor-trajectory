@@ -130,7 +130,7 @@ class SIREN(nn.Module):
         - Input dim = 1 (normalized time t)
         - Output dim = 2 (x, y coordinates)
         - Hidden layers = 3, width = 64 (from implementation plan)
-        - Total parameters ≈ 1 + 64 + 64×64×2 + 64×2 + biases ≈ 8,642
+        - Total parameters ≈ 12,738 (1×64 + 64×64×3 + 64×2 + biases)
     
     Key property (Section 3.1): Any derivative of a SIREN is itself a SIREN,
     since d/dx sin(x) = cos(x) = sin(x + π/2). This means velocity and

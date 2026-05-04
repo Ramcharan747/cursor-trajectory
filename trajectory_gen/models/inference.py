@@ -46,14 +46,14 @@ class TrajectoryGenerator:
         
         vqvae = VQVAE(
             input_dim=config['siren_param_count'],
-            embedding_dim=config.get('embedding_dim', 64),
-            num_embeddings=config.get('num_embeddings', 128),
+            embedding_dim=config.get('embedding_dim', 256),
+            num_embeddings=config.get('num_embeddings', 512),
         )
         vqvae.load_state_dict(checkpoint['vqvae_state_dict'])
         
         latent_ode = LatentODE(
-            input_dim=config.get('embedding_dim', 64),
-            latent_dim=config.get('latent_dim', 16),
+            input_dim=config.get('embedding_dim', 256),
+            latent_dim=config.get('latent_dim', 64),
         )
         latent_ode.load_state_dict(checkpoint['latent_ode_state_dict'])
         
