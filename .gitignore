@@ -13,10 +13,13 @@ desktop.ini
 *.swp
 *.swo
 
-# Data files (don't commit recorded data)
+# Data files (don't commit local capture data)
 cursor_capture_data/
 *.jsonl
 *.jsonl.gz
+# But allow training data in repo
+!data/raw/*.jsonl
+!data/raw/*.jsonl.gz
 
 # Logs
 *.log
