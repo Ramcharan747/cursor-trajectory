@@ -136,27 +136,29 @@ del x_all, y_all, t_all, all_segments
 import gc; gc.collect()
 
 # %% [markdown]
-# ## Cell 3: Train CVAE Model
+# ## Cell 3: Train Diffusion Model
 
 # %%
 import time
 from torch.utils.data import DataLoader, TensorDataset
-from trajectory_gen.models.cvae import TrajectoryCVAE
+from trajectory_gen.models.diffusion import TrajectoryDiffusion
 
 resampled_data = np.load('data/cvae_trajectories.npy')
 conditions = np.load('data/cvae_conditions.npy')
 
 # Normalize the input data to roughly [-1, 1] scale for stable CNN training
-# Max typical screen displacement is ~2000 pixels
 SCALE_FACTOR = 2000.0
 
-x_tensor = torch.tensor(resampled_data / SCALE_FACTOR, dtype=torch.float32)
+# Transpose x from (B, 64, 2) to (B, 2, 64) for Conv1d
+resampled_data_t = np.transpose(resampled_data, (0, 2, 1))
+
+x_tensor = torch.tensor(resampled_data_t / SCALE_FACTOR, dtype=torch.float32)
 c_tensor = torch.tensor(conditions / SCALE_FACTOR, dtype=torch.float32)
 
 dataset = TensorDataset(x_tensor, c_tensor)
 loader = DataLoader(dataset, batch_size=256, shuffle=True, num_workers=0)
 
-model = TrajectoryCVAE(seq_len=64, latent_dim=64, cond_dim=2).to(device)
+model = TrajectoryDiffusion(seq_len=64, channels=2, cond_dim=2, timesteps=100).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 
@@ -164,46 +166,40 @@ NUM_EPOCHS = 100
 best_loss = float('inf')
 t0 = time.time()
 
-print(f"Training CVAE ({sum(p.numel() for p in model.parameters()):,} params)...")
+print(f"Training Diffusion Model ({sum(p.numel() for p in model.parameters()):,} params)...")
 
 for epoch in range(NUM_EPOCHS):
     model.train()
-    ep_loss, ep_recon, ep_kl, nb = 0, 0, 0, 0
-    
-    # Anneal KL weight from 0.0 to 0.01 over the first 20 epochs (Cyclical Annealing)
-    kl_weight = min(0.01, 0.01 * (epoch / 20.0))
+    ep_loss, nb = 0, 0
     
     for x_batch, c_batch in loader:
         x_batch, c_batch = x_batch.to(device), c_batch.to(device)
         
         optimizer.zero_grad()
-        recon_x, mu, logvar = model(x_batch, c_batch)
-        loss, recon_loss, kl_loss = model.loss_function(recon_x, x_batch, mu, logvar, kl_weight=kl_weight)
+        loss = model.compute_loss(x_batch, c_batch)
         
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         
         ep_loss += loss.item()
-        ep_recon += recon_loss.item()
-        ep_kl += kl_loss.item()
         nb += 1
         
     scheduler.step()
     
     if (epoch + 1) % 10 == 0:
         avg_loss = ep_loss / nb
-        print(f"Epoch {epoch+1:3d}/{NUM_EPOCHS} | Loss: {avg_loss:.5f} (Recon: {ep_recon/nb:.5f}, KL: {ep_kl/nb:.5f}) | Time: {(time.time()-t0)/60:.1f}min")
+        print(f"Epoch {epoch+1:3d}/{NUM_EPOCHS} | MSE Noise Loss: {avg_loss:.5f} | Time: {(time.time()-t0)/60:.1f}min")
         
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'config': {'seq_len': 64, 'latent_dim': 64, 'cond_dim': 2, 'scale_factor': SCALE_FACTOR}
-            }, 'cvae_checkpoint.pt')
+                'config': {'seq_len': 64, 'channels': 2, 'cond_dim': 2, 'timesteps': 100, 'scale_factor': SCALE_FACTOR}
+            }, 'diffusion_checkpoint.pt')
 
-upload_file(path_or_fileobj='cvae_checkpoint.pt', path_in_repo='cvae_checkpoint.pt', repo_id=REPO_ID)
+upload_file(path_or_fileobj='diffusion_checkpoint.pt', path_in_repo='diffusion_checkpoint.pt', repo_id=REPO_ID)
 print(f"✅ Training complete in {(time.time()-t0)/60:.1f} minutes!")
 
 # %% [markdown]
@@ -230,16 +226,27 @@ with torch.no_grad():
         c = torch.tensor([[dx, dy]], dtype=torch.float32, device=device) / SCALE_FACTOR
         
         for col in range(4):
-            # Sample random latent vector
-            z = torch.randn(1, 64, device=device)
+            # Generate trajectory using 100-step DDPM reverse process
+            gen_traj_scaled = model.sample(c, batch_size=1) # (1, 2, 64)
             
-            # Generate trajectory
-            gen_traj_scaled = model.decode(z, c) # (1, 64, 2)
-            gen_traj = gen_traj_scaled.cpu().numpy()[0] * SCALE_FACTOR
+            # Transpose back to (64, 2) and scale
+            gen_traj = gen_traj_scaled.transpose(1, 2).cpu().numpy()[0] * SCALE_FACTOR
             
-            # Since model predicts relative to (0,0), shift to start point
-            gen_traj[:, 0] += start[0]
-            gen_traj[:, 1] += start[1]
+            # The model predicts the trajectory relative to (0,0), but the endpoints might not match exactly.
+            # We can force the generated path to perfectly hit the endpoint using a linear offset correction.
+            actual_dx = gen_traj[-1, 0] - gen_traj[0, 0]
+            actual_dy = gen_traj[-1, 1] - gen_traj[0, 1]
+            error_x = dx - actual_dx
+            error_y = dy - actual_dy
+            
+            # Apply correction linearly over the sequence
+            alpha = np.linspace(0, 1, 64)
+            gen_traj[:, 0] += alpha * error_x
+            gen_traj[:, 1] += alpha * error_y
+            
+            # Shift to start point
+            gen_traj[:, 0] = gen_traj[:, 0] - gen_traj[0, 0] + start[0]
+            gen_traj[:, 1] = gen_traj[:, 1] - gen_traj[0, 1] + start[1]
             
             axes[row, col].plot(gen_traj[:, 0], gen_traj[:, 1], '-', lw=2, color='royalblue')
             axes[row, col].plot(*start, 'go', ms=10, label='Start')
@@ -250,10 +257,10 @@ with torch.no_grad():
             axes[row, col].set_aspect('equal', adjustable='datalim')
             axes[row, col].grid(True, alpha=0.3)
 
-plt.suptitle('CVAE Generated Point-to-Point Cursor Trajectories', fontsize=16)
+plt.suptitle('Diffusion Generated Point-to-Point Cursor Trajectories', fontsize=16)
 plt.tight_layout()
-plt.savefig('cvae_samples.png', dpi=150, bbox_inches='tight')
+plt.savefig('diffusion_samples.png', dpi=150, bbox_inches='tight')
 plt.show()
 
-upload_file(path_or_fileobj='cvae_samples.png', path_in_repo='cvae_samples.png', repo_id=REPO_ID)
+upload_file(path_or_fileobj='diffusion_samples.png', path_in_repo='diffusion_samples.png', repo_id=REPO_ID)
 print("🎉 All done! Generated trajectories saved.")
