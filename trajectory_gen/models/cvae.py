@@ -84,7 +84,11 @@ class TrajectoryCVAE(nn.Module):
         x = x.transpose(1, 2)
         h = self.encoder_cnn(x)
         h = h.view(h.size(0), -1)
-        return self.fc_mu(h), self.fc_logvar(h)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        # Prevent NaN explosions
+        logvar = torch.clamp(logvar, min=-20.0, max=20.0)
+        return mu, logvar
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
