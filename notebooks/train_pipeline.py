@@ -227,7 +227,8 @@ weight_matrix /= w_std
 weight_norm_tensor = torch.from_numpy(weight_matrix)
 
 dataset = TensorDataset(weight_norm_tensor)
-loader = DataLoader(dataset, batch_size=1024, shuffle=True, num_workers=2, pin_memory=True)
+# CRITICAL RAM FIX 3: num_workers=0 prevents Python from cloning the 4.2GB matrix into multiple background processes
+loader = DataLoader(dataset, batch_size=1024, shuffle=True, num_workers=0, pin_memory=False)
 
 vqvae = VQVAE(input_dim=weight_matrix.shape[1], hidden_dim=2048,
     embedding_dim=256, num_embeddings=512, commitment_cost=0.25, ema_decay=0.99).to(device)
@@ -333,7 +334,8 @@ import gc; gc.collect(); torch.cuda.empty_cache()
 seq_t = torch.tensor(seqs, dtype=torch.float32)
 cond_t = torch.tensor(conds, dtype=torch.float32)
 tp = torch.linspace(0, 1, SEQ_LEN)
-dl = DataLoader(TensorDataset(seq_t, cond_t), batch_size=128, shuffle=True, num_workers=2, pin_memory=True)
+# CRITICAL RAM FIX 3: num_workers=0 prevents RAM cloning
+dl = DataLoader(TensorDataset(seq_t, cond_t), batch_size=128, shuffle=True, num_workers=0, pin_memory=False)
 
 latent_ode = LatentODE(input_dim=258, latent_dim=64, rec_hidden_dim=256,
     gen_hidden_dim=512, output_dim=256, use_adjoint=True).to(device)
