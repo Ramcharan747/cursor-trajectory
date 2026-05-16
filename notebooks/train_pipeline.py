@@ -29,7 +29,7 @@ login(token=HF_TOKEN)
 api = HfApi()
 
 # Create HF repo for checkpoints
-REPO_ID = "Ramcharan747/cursor-trajectory-checkpoints"
+REPO_ID = "Baka7/cursor-trajectory-checkpoints"
 try:
     api.create_repo(REPO_ID, repo_type="model", private=False, exist_ok=True)
     print(f"✅ HF repo ready: https://huggingface.co/{REPO_ID}")
