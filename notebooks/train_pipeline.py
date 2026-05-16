@@ -1,51 +1,44 @@
 # %% [markdown]
-# # 🖱️ Cursor Trajectory — Full Training Pipeline
-# 
+# # 🖱️ Cursor Trajectory — Full Training Pipeline (v2 — all fixes)
+#
 # **Pipeline: Raw Data → Segmentation → SIREN → VQ-VAE → Latent ODE**
-# 
+#
 # All checkpoints saved to HuggingFace Hub automatically.
 # Designed for Colab T4 GPU (16GB VRAM).
 
 # %% [markdown]
-# ## Cell 1: Setup — Clone repo, install deps, login to HF
+# ## Cell 1: Setup
 
 # %%
 import os, subprocess, sys
 
-# Clone repo
-if not os.path.exists('cursor-trajectory'):
+if not os.path.exists('/content/cursor-trajectory'):
     subprocess.run(['git', 'clone', 'https://github.com/Ramcharan747/cursor-trajectory.git'], check=True)
-os.chdir('cursor-trajectory')
+os.chdir('/content/cursor-trajectory')
+sys.path.insert(0, '/content/cursor-trajectory')
 
-# Install dependencies
 subprocess.run([sys.executable, '-m', 'pip', 'install', '-q',
     'torch', 'numpy', 'matplotlib', 'tqdm', 'torchdiffeq', 'huggingface_hub'], check=True)
 
-# HuggingFace login
-from huggingface_hub import HfApi, login
+from huggingface_hub import HfApi, login, upload_file as _hf_upload
 from google.colab import userdata
+import torch, numpy as np
+
 HF_TOKEN = userdata.get('HF_TOKEN')
 login(token=HF_TOKEN)
-api = HfApi()
-
-# Create HF repo for checkpoints
 REPO_ID = "Baka7/cursor-trajectory-checkpoints"
-try:
-    api.create_repo(REPO_ID, repo_type="model", private=False, exist_ok=True)
-    print(f"✅ HF repo ready: https://huggingface.co/{REPO_ID}")
-except Exception as e:
-    print(f"HF repo: {e}")
 
-# Verify GPU
-import torch
+# Safe upload wrapper — never crashes training
+def upload_file(**kwargs):
+    kwargs['token'] = HF_TOKEN
+    try:
+        _hf_upload(**kwargs)
+    except Exception as e:
+        print(f"⚠️ Upload skipped: {e}")
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if torch.cuda.is_available():
-    gpu_name = torch.cuda.get_device_name(0)
-    gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1e9
-    print(f"✅ GPU: {gpu_name} ({gpu_mem:.1f} GB)")
-else:
-    print("⚠️ No GPU — training will be very slow!")
-
+    print(f"✅ GPU: {torch.cuda.get_device_name(0)} ({torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB)")
 print("✅ Setup complete")
 
 # %% [markdown]
@@ -53,528 +46,394 @@ print("✅ Setup complete")
 
 # %%
 import gzip, json, glob
-import numpy as np
 from tqdm import tqdm
 
-# Load all recordings
 data_dir = 'data/raw'
 x_all, y_all, t_all = [], [], []
 
 files = sorted(glob.glob(f'{data_dir}/cursor_*.jsonl.gz')) + sorted(glob.glob(f'{data_dir}/cursor_*.jsonl'))
-print(f"Loading {len(files)} recording files...")
+print(f"Loading {len(files)} files...")
 
 for f in tqdm(files, desc="Loading"):
     opener = gzip.open if f.endswith('.gz') else open
     with opener(f, 'rt') as fh:
         for line in fh:
             line = line.strip()
-            if not line:
-                continue
+            if not line: continue
             try:
                 e = json.loads(line)
                 x_all.append(float(e['x']))
                 y_all.append(float(e['y']))
                 t_all.append(int(e['t']))
-            except:
-                continue
+            except: continue
 
 x_all = np.array(x_all, dtype=np.float64)
 y_all = np.array(y_all, dtype=np.float64)
 t_all = np.array(t_all, dtype=np.int64)
 
-# Sort by time
 order = np.argsort(t_all)
 x_all, y_all, t_all = x_all[order], y_all[order], t_all[order]
 print(f"✅ Loaded {len(x_all):,} events")
 
-# %%
-# Split at idle periods (>2s gap) and segment
-from trajectory_gen.data.segmentation import segment_trajectory, Segment
+# Segment
+from trajectory_gen.data.segmentation import segment_trajectory
 
-# Split at idle gaps
-dt = np.diff(t_all) / 1e6  # microseconds → seconds
-idle_mask = dt > 2.0
-split_indices = np.where(idle_mask)[0] + 1
+dt = np.diff(t_all) / 1e6
+split_indices = np.where(dt > 2.0)[0] + 1
 boundaries = [0] + split_indices.tolist() + [len(x_all)]
 
-print(f"Found {len(boundaries)-1} active periods")
-
-# Segment each active period
 all_segments = []
 for i in tqdm(range(len(boundaries) - 1), desc="Segmenting"):
     s, e = boundaries[i], boundaries[i + 1]
-    if e - s < 10:
-        continue
-    segs = segment_trajectory(
-        x_all[s:e], y_all[s:e], t_all[s:e],
-        min_points=15, min_duration_s=0.05, max_duration_s=3.0,
-    )
+    if e - s < 10: continue
+    segs = segment_trajectory(x_all[s:e], y_all[s:e], t_all[s:e],
+        min_points=15, min_duration_s=0.05, max_duration_s=3.0)
     all_segments.extend(segs)
 
-print(f"✅ {len(all_segments):,} segments extracted")
-print(f"   Avg duration: {np.mean([s.duration_s for s in all_segments]):.2f}s")
-print(f"   Avg points:   {np.mean([s.num_points for s in all_segments]):.0f}")
-
-# Save segments with start/end coordinates for point-to-point conditioning
 seg_dicts = []
 for s in all_segments:
-    seg_dicts.append({
-        't': s.t, 'x': s.x, 'y': s.y,
+    seg_dicts.append({'t': s.t, 'x': s.x, 'y': s.y,
         'start': np.array([s.x[0], s.y[0]]),
-        'end': np.array([s.x[-1], s.y[-1]]),
-        'displacement': np.array([s.x[-1] - s.x[0], s.y[-1] - s.y[0]]),
-    })
+        'end': np.array([s.x[-1], s.y[-1]])})
+
 np.save('data/segments.npy', seg_dicts, allow_pickle=True)
-print(f"💾 Saved segments to data/segments.npy")
+print(f"✅ {len(seg_dicts):,} segments saved")
+
+# FREE MEMORY — prevents OOM crash later
+del x_all, y_all, t_all, all_segments, seg_dicts, order, dt
+import gc; gc.collect()
+print("🗑️ Raw data freed from RAM")
 
 # %% [markdown]
-# ## Cell 3: Fit SIRENs to All Segments (Phase 1)
+# ## Cell 3: Fit SIRENs — Batched (3 hidden layers = 12,738 dims)
 
 # %%
-import torch
-from trajectory_gen.models.siren import SIREN, SIRENFitter
-from huggingface_hub import upload_file
-import time
+import torch, numpy as np, math, time
+from tqdm import tqdm
+
+class BatchedSIRENFitter:
+    def __init__(self, hidden=64, n_hidden=3, omega=30.0, lr=5e-4, iters=200, device='cuda'):
+        self.H, self.n_hidden, self.omega = hidden, n_hidden, omega
+        self.lr, self.iters, self.device = lr, iters, device
+
+    def fit_batch(self, segments):
+        B, H = len(segments), self.H
+        max_len = max(len(s['t']) for s in segments)
+        t_b = torch.zeros(B, max_len, 1, device=self.device)
+        xy_b = torch.zeros(B, max_len, 2, device=self.device)
+        mask = torch.zeros(B, max_len, 1, device=self.device)
+
+        for i, seg in enumerate(segments):
+            n = len(seg['t'])
+            tn = (seg['t'] - seg['t'][0]) / max(seg['t'][-1] - seg['t'][0], 1e-6) * 2 - 1
+            t_b[i, :n, 0] = torch.tensor(tn, dtype=torch.float32)
+            xy_b[i, :n, 0] = torch.tensor(seg['x'], dtype=torch.float32)
+            xy_b[i, :n, 1] = torch.tensor(seg['y'], dtype=torch.float32)
+            mask[i, :n, 0] = 1.0
+
+        xy_min = (xy_b * mask + (1-mask)*1e9).reshape(B,-1).min(1,keepdim=True)[0].unsqueeze(-1)
+        xy_max = (xy_b * mask + (1-mask)*(-1e9)).reshape(B,-1).max(1,keepdim=True)[0].unsqueeze(-1)
+        xy_s = (xy_max - xy_min).clamp(min=1.0)
+        xy_n = (xy_b - xy_min) / xy_s * 2 - 1
+
+        params = []
+        W0 = ((torch.rand(B,H,1,device=self.device)*2-1)*1.0).requires_grad_(True)
+        b0 = ((torch.rand(B,H,1,device=self.device)*2-1)*1.0).requires_grad_(True)
+        params += [W0, b0]
+
+        bh = math.sqrt(6.0/H)/self.omega
+        Ws, bs = [], []
+        for _ in range(self.n_hidden):  # 3 hidden layers
+            W = ((torch.rand(B,H,H,device=self.device)*2-1)*bh).requires_grad_(True)
+            b = ((torch.rand(B,H,1,device=self.device)*2-1)*bh).requires_grad_(True)
+            Ws.append(W); bs.append(b); params += [W, b]
+
+        bo = math.sqrt(6.0/H)/self.omega
+        Wo = ((torch.rand(B,2,H,device=self.device)*2-1)*bo).requires_grad_(True)
+        bo2 = torch.zeros(B,2,1,device=self.device).requires_grad_(True)
+        params += [Wo, bo2]
+
+        opt = torch.optim.Adam(params, lr=self.lr)
+        for _ in range(self.iters):
+            h = t_b.transpose(1,2)
+            h = torch.sin(self.omega*(torch.bmm(W0,h)+b0))
+            for W,b in zip(Ws,bs): h = torch.sin(self.omega*(torch.bmm(W,h)+b))
+            out = (torch.bmm(Wo,h)+bo2).transpose(1,2)
+            loss = ((out-xy_n)*mask).pow(2).sum()/mask.sum()/2
+            opt.zero_grad(); loss.backward(); opt.step()
+
+        wvs, errs = [], []
+        with torch.no_grad():
+            h = t_b.transpose(1,2)
+            h = torch.sin(self.omega*(torch.bmm(W0,h)+b0))
+            for W,b in zip(Ws,bs): h = torch.sin(self.omega*(torch.bmm(W,h)+b))
+            pred_n = (torch.bmm(Wo,h)+bo2).transpose(1,2)
+            pred = pred_n * xy_s/2 + xy_s/2 + xy_min
+            for i in range(B):
+                n = int(mask[i].sum().item())
+                errs.append(torch.sqrt(((pred[i,:n]-xy_b[i,:n])**2).sum(1)).mean().item())
+                wvs.append(torch.cat([W0[i].flatten(),b0[i].flatten()]+
+                    [p[i].flatten() for pr in zip(Ws,bs) for p in pr]+
+                    [Wo[i].flatten(),bo2[i].flatten()]).cpu().numpy())
+        return wvs, errs
 
 segments_data = np.load('data/segments.npy', allow_pickle=True)
-print(f"Fitting SIRENs to {len(segments_data):,} segments...")
+fitter = BatchedSIRENFitter(hidden=64, n_hidden=3, omega=30.0, lr=5e-4, iters=200, device=device)
+all_w, all_ep, all_e = [], [], []
+t0 = time.time()
 
-fitter = SIRENFitter(
-    hidden_features=64,
-    hidden_layers=3,
-    omega_0=30.0,
-    lr=1e-4,
-    num_iterations=500,
-    device=device,
-)
-
-weight_vectors = []
-metadata_list = []
-endpoint_list = []  # (start_x, start_y, end_x, end_y) for each segment
-errors = []
-start_time = time.time()
-
-for i in tqdm(range(len(segments_data)), desc="SIREN fitting"):
-    seg = segments_data[i]
+for bs in tqdm(range(0, len(segments_data), 512), desc="SIREN batches"):
+    batch = segments_data[bs:bs+512]
     try:
-        model, weights, meta = fitter.fit(seg['t'], seg['x'], seg['y'])
-        weight_vectors.append(weights.cpu().numpy())
-        metadata_list.append(meta)
-        errors.append(meta['mean_pixel_error'])
-        # Store start/end coordinates for point-to-point conditioning
-        endpoint_list.append([seg['x'][0], seg['y'][0], seg['x'][-1], seg['y'][-1]])
-    except Exception as e:
-        continue
+        w, e = fitter.fit_batch(batch)
+        all_w.extend(w); all_e.extend(e)
+        for s in batch: all_ep.append([s['x'][0],s['y'][0],s['x'][-1],s['y'][-1]])
+    except: torch.cuda.empty_cache(); continue
 
-    # Checkpoint every 5000 segments
-    if (i + 1) % 5000 == 0:
-        elapsed = time.time() - start_time
-        print(f"  [{i+1}/{len(segments_data)}] avg_error={np.mean(errors[-5000:]):.2f}px, time={elapsed/60:.1f}min")
+weight_matrix = np.stack(all_w)
+endpoints = np.array(all_ep)
+print(f"\n✅ {weight_matrix.shape} — expect (*, 12738)")
+print(f"   Error: {np.mean(all_e):.2f}px | Time: {(time.time()-t0)/60:.1f}min")
 
-weight_matrix = np.stack(weight_vectors)
-endpoints = np.array(endpoint_list)  # (N, 4) = [start_x, start_y, end_x, end_y]
-print(f"\n✅ SIREN fitting complete: {len(weight_vectors):,} segments")
-print(f"   Weight matrix shape: {weight_matrix.shape}")
-print(f"   Endpoints shape: {endpoints.shape}")
-print(f"   Mean pixel error: {np.mean(errors):.2f}px")
-print(f"   Max pixel error:  {np.max(errors):.2f}px")
-print(f"   Time: {(time.time() - start_time)/60:.1f} minutes")
-
-# Save and upload to HF
 np.save('data/siren_weights.npy', weight_matrix)
-np.save('data/siren_metadata.npy', metadata_list, allow_pickle=True)
 np.save('data/segment_endpoints.npy', endpoints)
-upload_file(path_or_fileobj='data/siren_weights.npy', path_in_repo='siren_weights.npy', repo_id=REPO_ID, token=HF_TOKEN)
-upload_file(path_or_fileobj='data/siren_metadata.npy', path_in_repo='siren_metadata.npy', repo_id=REPO_ID, token=HF_TOKEN)
-upload_file(path_or_fileobj='data/segment_endpoints.npy', path_in_repo='segment_endpoints.npy', repo_id=REPO_ID, token=HF_TOKEN)
-print(f"💾 Uploaded SIREN weights + endpoints to HuggingFace: {REPO_ID}")
+upload_file(path_or_fileobj='data/siren_weights.npy', path_in_repo='siren_weights.npy', repo_id=REPO_ID)
+upload_file(path_or_fileobj='data/segment_endpoints.npy', path_in_repo='segment_endpoints.npy', repo_id=REPO_ID)
+
+# Free memory
+del segments_data, fitter, all_w, all_e
+import gc; gc.collect(); torch.cuda.empty_cache()
+print("💾 Uploaded + memory freed")
 
 # %% [markdown]
-# ## Cell 4: Train VQ-VAE (Phase 2)
+# ## Cell 4: Train VQ-VAE (with codebook collapse fix)
 
 # %%
-import torch
-import torch.nn.functional as F
+import torch, torch.nn.functional as F, numpy as np, time
 from torch.utils.data import DataLoader, TensorDataset
 from trajectory_gen.models.vqvae import VQVAE
-from huggingface_hub import upload_file
-import time, json
 
-# Load precomputed SIREN weights
 weight_matrix = np.load('data/siren_weights.npy')
-print(f"Training VQ-VAE on {weight_matrix.shape[0]:,} weight vectors of dim {weight_matrix.shape[1]}")
+print(f"VQ-VAE: {weight_matrix.shape[0]:,} vectors × dim {weight_matrix.shape[1]}")
 
-# Normalize weight vectors
 w_mean = weight_matrix.mean(axis=0)
 w_std = weight_matrix.std(axis=0) + 1e-8
 weight_norm = (weight_matrix - w_mean) / w_std
 
-# Create dataloader
 dataset = TensorDataset(torch.tensor(weight_norm, dtype=torch.float32))
 loader = DataLoader(dataset, batch_size=1024, shuffle=True, num_workers=2, pin_memory=True)
 
-# Initialize VQ-VAE (scaled for VRAM)
-vqvae = VQVAE(
-    input_dim=weight_matrix.shape[1],
-    hidden_dim=2048,
-    embedding_dim=256,
-    num_embeddings=512,
-    commitment_cost=0.25,
-    ema_decay=0.99,
-).to(device)
+vqvae = VQVAE(input_dim=weight_matrix.shape[1], hidden_dim=2048,
+    embedding_dim=256, num_embeddings=512, commitment_cost=0.25, ema_decay=0.99).to(device)
 
-optimizer = torch.optim.Adam(vqvae.parameters(), lr=3e-4)
+# CRITICAL: Initialize codebook from encoder outputs to prevent collapse
+with torch.no_grad():
+    sample = torch.tensor(weight_norm[np.random.choice(len(weight_norm), 512, replace=False)], dtype=torch.float32).to(device)
+    z_e = vqvae.encoder(sample)
+    vqvae.vq.embedding.data.copy_(z_e)
+print("✅ Codebook initialized from data")
+
+optimizer = torch.optim.Adam(vqvae.parameters(), lr=1e-3)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 scaler = torch.amp.GradScaler('cuda')
 
-print(f"VQ-VAE params: {sum(p.numel() for p in vqvae.parameters()):,}")
-print(f"Batches per epoch: {len(loader)}")
-
-# Training loop
 NUM_EPOCHS = 100
 best_loss = float('inf')
-start_time = time.time()
-history = {'recon': [], 'vq': [], 'perplexity': []}
+t0 = time.time()
 
 for epoch in range(NUM_EPOCHS):
     vqvae.train()
-    epoch_recon, epoch_vq, epoch_perp = 0, 0, 0
-    n_batches = 0
-
+    ep_r, ep_v, ep_p, nb = 0, 0, 0, 0
     for (batch,) in loader:
         batch = batch.to(device)
         optimizer.zero_grad()
-
         with torch.amp.autocast('cuda'):
-            x_recon, vq_loss, indices, perplexity = vqvae(batch)
-            recon_loss = F.mse_loss(x_recon, batch)
-            loss = recon_loss + vq_loss
-
+            x_rec, vq_loss, indices, perp = vqvae(batch)
+            recon = F.mse_loss(x_rec, batch)
+            loss = recon + vq_loss
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        epoch_recon += recon_loss.item()
-        epoch_vq += vq_loss.item()
-        epoch_perp += perplexity.item()
-        n_batches += 1
-
+        scaler.step(optimizer); scaler.update()
+        ep_r += recon.item(); ep_v += vq_loss.item(); ep_p += perp.item(); nb += 1
     scheduler.step()
-    avg_recon = epoch_recon / n_batches
-    avg_vq = epoch_vq / n_batches
-    avg_perp = epoch_perp / n_batches
-    history['recon'].append(avg_recon)
-    history['vq'].append(avg_vq)
-    history['perplexity'].append(avg_perp)
+    ar, av, ap = ep_r/nb, ep_v/nb, ep_p/nb
 
-    if (epoch + 1) % 10 == 0:
-        elapsed = (time.time() - start_time) / 60
-        print(f"  Epoch {epoch+1:3d}/{NUM_EPOCHS} | recon={avg_recon:.6f} vq={avg_vq:.6f} perplexity={avg_perp:.1f} | {elapsed:.1f}min")
+    # Reset dead codebook entries every 10 epochs
+    if (epoch+1) % 10 == 0:
+        with torch.no_grad():
+            samp = torch.tensor(weight_norm[np.random.choice(len(weight_norm), 4096)], dtype=torch.float32).to(device)
+            ze = vqvae.encoder(samp)
+            usage = torch.zeros(512, device=device)
+            _, _, idx, _ = vqvae.vq(ze)
+            for j in idx: usage[j] += 1
+            dead = (usage == 0).nonzero().squeeze(-1)
+            if len(dead) > 0:
+                ri = torch.randint(0, len(ze), (len(dead),))
+                vqvae.vq.embedding.data[dead] = ze[ri]
+                print(f"    ↻ Reset {len(dead)} dead codes")
+        print(f"  Epoch {epoch+1:3d}/100 | recon={ar:.6f} vq={av:.6f} perp={ap:.1f}/512 | {(time.time()-t0)/60:.1f}min")
 
-    # Save best + periodic checkpoint
-    total_loss = avg_recon + avg_vq
-    if total_loss < best_loss or (epoch + 1) % 25 == 0:
-        if total_loss < best_loss:
-            best_loss = total_loss
-        ckpt = {
-            'epoch': epoch,
-            'model_state_dict': vqvae.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': total_loss,
-            'config': {
-                'input_dim': weight_matrix.shape[1],
-                'hidden_dim': 2048, 'embedding_dim': 256,
-                'num_embeddings': 512,
-                'w_mean': w_mean.tolist(), 'w_std': w_std.tolist(),
-            },
-            'history': history,
-        }
-        torch.save(ckpt, 'vqvae_checkpoint.pt')
-        upload_file(path_or_fileobj='vqvae_checkpoint.pt', path_in_repo='vqvae_checkpoint.pt', repo_id=REPO_ID, token=HF_TOKEN)
+    tl = ar + av
+    if tl < best_loss:
+        best_loss = tl
+        torch.save({'epoch': epoch, 'model_state_dict': vqvae.state_dict(),
+            'config': {'input_dim': weight_matrix.shape[1], 'hidden_dim': 2048,
+                'embedding_dim': 256, 'num_embeddings': 512,
+                'w_mean': w_mean.tolist(), 'w_std': w_std.tolist()}},
+            'vqvae_checkpoint.pt')
+    if (epoch+1) % 50 == 0:
+        upload_file(path_or_fileobj='vqvae_checkpoint.pt', path_in_repo='vqvae_checkpoint.pt', repo_id=REPO_ID)
 
-print(f"\n✅ VQ-VAE training complete in {(time.time() - start_time)/60:.1f} minutes")
-print(f"   Best loss: {best_loss:.6f}")
-print(f"   Final perplexity: {history['perplexity'][-1]:.1f} / 512")
-print(f"💾 Saved to HuggingFace: {REPO_ID}/vqvae_checkpoint.pt")
+# Final upload
+upload_file(path_or_fileobj='vqvae_checkpoint.pt', path_in_repo='vqvae_checkpoint.pt', repo_id=REPO_ID)
+print(f"\n✅ VQ-VAE done in {(time.time()-t0)/60:.1f}min | loss={best_loss:.6f} perp={ap:.1f}/512")
 
 # %% [markdown]
-# ## Cell 5: Train Latent ODE — Conditioned on Start/End Points (Phase 3)
-# 
-# The Latent ODE is conditioned on displacement vectors (dx, dy) so it learns
-# to generate DIFFERENT trajectory shapes for different start→end pairs.
-# This prevents straight-line collapse and ensures diversity.
+# ## Cell 5: Train Latent ODE — Conditioned on displacement
 
 # %%
-import torch
+import torch, numpy as np, time
 from torch.utils.data import DataLoader, TensorDataset
 from trajectory_gen.models.latent_ode import LatentODE
-from huggingface_hub import upload_file
-import time
 
-# Load VQ-VAE and encode all segments to primitive sequences
 vqvae.eval()
-weight_tensor = torch.tensor(weight_norm, dtype=torch.float32).to(device)
+weight_tensor = torch.tensor(weight_norm, dtype=torch.float32)
 
-# Encode in batches to avoid OOM
 batch_sz = 4096
-all_embeddings = []
-all_indices = []
+all_emb = []
 with torch.no_grad():
-    for start in range(0, len(weight_tensor), batch_sz):
-        chunk = weight_tensor[start:start+batch_sz].to(device)
-        z_e = vqvae.encoder(chunk)
-        _, _, idx, _ = vqvae.vq(z_e)
-        emb = vqvae.vq.embedding(idx)
-        all_embeddings.append(emb.cpu())
-        all_indices.append(idx.cpu())
+    for i in range(0, len(weight_tensor), batch_sz):
+        chunk = weight_tensor[i:i+batch_sz].to(device)
+        ze = vqvae.encoder(chunk)
+        _, _, idx, _ = vqvae.vq(ze)
+        all_emb.append(vqvae.vq.embedding(idx).cpu())
+emb_all = torch.cat(all_emb, 0).numpy()
+print(f"Encoded {len(emb_all):,} → {emb_all.shape[1]}d")
 
-embeddings_all = torch.cat(all_embeddings, dim=0).numpy()
-print(f"Encoded {len(embeddings_all):,} segments to {embeddings_all.shape[1]}d embeddings")
-
-# Load endpoint data for conditioning
-endpoints = np.load('data/segment_endpoints.npy')  # (N, 4) [sx, sy, ex, ey]
-
-# Build sequences with displacement conditioning
-# Each sequence = (primitive_embeddings, displacement_from_start_to_end)
+endpoints = np.load('data/segment_endpoints.npy')
 SEQ_LEN = 16
-sequences = []
-conditions = []  # normalized displacement for each sequence
+seqs, conds = [], []
+for i in range(0, len(emb_all)-SEQ_LEN, SEQ_LEN//2):
+    seqs.append(emb_all[i:i+SEQ_LEN])
+    disp = endpoints[i+SEQ_LEN-1, 2:] - endpoints[i, :2]
+    conds.append(disp / 2000.0)
+seqs = np.stack(seqs); conds = np.stack(conds)
+print(f"{len(seqs):,} sequences of len {SEQ_LEN}")
 
-for i in range(0, len(embeddings_all) - SEQ_LEN, SEQ_LEN // 2):
-    seq_embs = embeddings_all[i:i+SEQ_LEN]
-    # Sequence-level displacement: start of first segment → end of last segment
-    seq_start = endpoints[i, :2]   # (sx, sy) of first primitive
-    seq_end = endpoints[i+SEQ_LEN-1, 2:]  # (ex, ey) of last primitive
-    disp = seq_end - seq_start
-    # Normalize displacement by screen diagonal (~2000px)
-    disp_norm = disp / 2000.0
-    sequences.append(seq_embs)
-    conditions.append(disp_norm)
+# Free weight data
+del weight_tensor, weight_norm, all_emb
+import gc; gc.collect(); torch.cuda.empty_cache()
 
-sequences = np.stack(sequences)
-conditions = np.stack(conditions)
-print(f"Created {len(sequences):,} sequences of length {SEQ_LEN}")
-print(f"Displacement range: dx=[{conditions[:,0].min():.2f}, {conditions[:,0].max():.2f}], dy=[{conditions[:,1].min():.2f}, {conditions[:,1].max():.2f}]")
+seq_t = torch.tensor(seqs, dtype=torch.float32)
+cond_t = torch.tensor(conds, dtype=torch.float32)
+tp = torch.linspace(0, 1, SEQ_LEN)
+dl = DataLoader(TensorDataset(seq_t, cond_t), batch_size=128, shuffle=True, num_workers=2, pin_memory=True)
 
-# Create dataloader — sequences + displacement condition
-seq_tensor = torch.tensor(sequences, dtype=torch.float32)
-cond_tensor = torch.tensor(conditions, dtype=torch.float32)
-time_points = torch.linspace(0, 1, SEQ_LEN)
-seq_dataset = TensorDataset(seq_tensor, cond_tensor)
-seq_loader = DataLoader(seq_dataset, batch_size=128, shuffle=True, num_workers=2, pin_memory=True)
+latent_ode = LatentODE(input_dim=258, latent_dim=64, rec_hidden_dim=256,
+    gen_hidden_dim=512, output_dim=256, use_adjoint=True).to(device)
+opt = torch.optim.Adamax(latent_ode.parameters(), lr=0.01)
+sched = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.999)
+print(f"Latent ODE: {latent_ode.num_parameters:,} params")
 
-# Initialize Latent ODE (input_dim = 256 embedding + 2 displacement condition)
-latent_ode = LatentODE(
-    input_dim=256 + 2,  # embedding + (dx, dy) condition
-    latent_dim=64,
-    rec_hidden_dim=256,
-    gen_hidden_dim=512,
-    output_dim=256,  # decode back to embedding space only
-    use_adjoint=True,
-).to(device)
-
-optimizer = torch.optim.Adamax(latent_ode.parameters(), lr=0.01)
-scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.999)
-
-print(f"Latent ODE params: {latent_ode.num_parameters:,}")
-print(f"Input: 256d embedding + 2d displacement condition = 258d")
-
-# Training loop with KL annealing
 NUM_EPOCHS = 200
 best_loss = float('inf')
-start_time = time.time()
-kl_anneal_rate = 0.99
-history = {'total': [], 'recon': [], 'kl': []}
+t0 = time.time()
 
 for epoch in range(NUM_EPOCHS):
     latent_ode.train()
-    kl_weight = 1.0 - kl_anneal_rate ** (epoch + 1)
-
-    epoch_total, epoch_recon, epoch_kl = 0, 0, 0
-    n_batches = 0
-
-    for batch_emb, batch_cond in seq_loader:
-        batch_emb = batch_emb.to(device)   # (B, SEQ_LEN, 256)
-        batch_cond = batch_cond.to(device)  # (B, 2)
-        t = time_points.to(device)
-        optimizer.zero_grad()
-
-        # Concatenate displacement condition to every timestep
-        cond_expanded = batch_cond.unsqueeze(1).expand(-1, SEQ_LEN, -1)  # (B, SEQ_LEN, 2)
-        batch_input = torch.cat([batch_emb, cond_expanded], dim=-1)  # (B, SEQ_LEN, 258)
-
+    kl_w = 1.0 - 0.99 ** (epoch+1)
+    et, er, ek, nb = 0, 0, 0, 0
+    for be, bc in dl:
+        be, bc = be.to(device), bc.to(device)
+        t = tp.to(device)
+        opt.zero_grad()
+        ce = bc.unsqueeze(1).expand(-1, SEQ_LEN, -1)
+        bi = torch.cat([be, ce], dim=-1)
         try:
-            x_recon, mu, logvar = latent_ode(batch_input, t)
-            # Loss only on the embedding part (first 256 dims)
-            loss, metrics = latent_ode.compute_loss(
-                batch_emb, x_recon, mu, logvar,
-                kl_weight=kl_weight, obs_variance=0.01,
-            )
+            xr, mu, lv = latent_ode(bi, t)
+            loss, m = latent_ode.compute_loss(be, xr, mu, lv, kl_weight=kl_w, obs_variance=0.01)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(latent_ode.parameters(), max_norm=10.0)
-            optimizer.step()
-
-            epoch_total += metrics['total_loss']
-            epoch_recon += metrics['recon_loss']
-            epoch_kl += metrics['kl_loss']
-            n_batches += 1
+            torch.nn.utils.clip_grad_norm_(latent_ode.parameters(), 10.0)
+            opt.step()
+            et += m['total_loss']; er += m['recon_loss']; ek += m['kl_loss']; nb += 1
         except Exception as e:
-            if 'out of memory' in str(e).lower():
-                torch.cuda.empty_cache()
-                continue
+            if 'out of memory' in str(e).lower(): torch.cuda.empty_cache(); continue
             raise
+    sched.step()
+    if nb > 0:
+        at, arec, akl = et/nb, er/nb, ek/nb
+        if (epoch+1) % 20 == 0:
+            nfe = latent_ode.ode_func.nfe; latent_ode.ode_func.nfe = 0
+            print(f"  Epoch {epoch+1:3d}/200 | loss={at:.4f} recon={arec:.4f} kl={akl:.4f} kl_w={kl_w:.3f} NFE={nfe} | {(time.time()-t0)/60:.1f}min")
+        if at < best_loss:
+            best_loss = at
+            torch.save({'epoch': epoch, 'model_state_dict': latent_ode.state_dict(),
+                'config': {'input_dim': 258, 'output_dim': 256, 'latent_dim': 64,
+                    'rec_hidden_dim': 256, 'gen_hidden_dim': 512, 'seq_len': SEQ_LEN,
+                    'siren_param_count': weight_matrix.shape[1]}},
+                'latent_ode_checkpoint.pt')
+        if (epoch+1) % 50 == 0:
+            upload_file(path_or_fileobj='latent_ode_checkpoint.pt', path_in_repo='latent_ode_checkpoint.pt', repo_id=REPO_ID)
 
-    scheduler.step()
-
-    if n_batches > 0:
-        avg_total = epoch_total / n_batches
-        avg_recon = epoch_recon / n_batches
-        avg_kl = epoch_kl / n_batches
-        history['total'].append(avg_total)
-        history['recon'].append(avg_recon)
-        history['kl'].append(avg_kl)
-
-        if (epoch + 1) % 20 == 0:
-            elapsed = (time.time() - start_time) / 60
-            nfe = latent_ode.ode_func.nfe
-            latent_ode.ode_func.nfe = 0
-            print(f"  Epoch {epoch+1:3d}/{NUM_EPOCHS} | loss={avg_total:.4f} recon={avg_recon:.4f} kl={avg_kl:.4f} kl_w={kl_weight:.3f} NFE={nfe} | {elapsed:.1f}min")
-
-        # Checkpoint
-        if avg_total < best_loss or (epoch + 1) % 50 == 0:
-            if avg_total < best_loss:
-                best_loss = avg_total
-            ckpt = {
-                'epoch': epoch,
-                'model_state_dict': latent_ode.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_total,
-                'config': {
-                    'input_dim': 258, 'output_dim': 256,
-                    'latent_dim': 64,
-                    'rec_hidden_dim': 256, 'gen_hidden_dim': 512,
-                    'seq_len': SEQ_LEN,
-                    'siren_param_count': weight_matrix.shape[1],
-                    'hidden_features': 64, 'hidden_layers': 3,
-                    'embedding_dim': 256, 'num_embeddings': 512,
-                },
-                'history': history,
-            }
-            torch.save(ckpt, 'latent_ode_checkpoint.pt')
-            upload_file(path_or_fileobj='latent_ode_checkpoint.pt', path_in_repo='latent_ode_checkpoint.pt', repo_id=REPO_ID, token=HF_TOKEN)
-
-print(f"\n✅ Latent ODE training complete in {(time.time() - start_time)/60:.1f} minutes")
-print(f"   Best loss: {best_loss:.4f}")
-print(f"💾 Saved to HuggingFace: {REPO_ID}/latent_ode_checkpoint.pt")
+upload_file(path_or_fileobj='latent_ode_checkpoint.pt', path_in_repo='latent_ode_checkpoint.pt', repo_id=REPO_ID)
+print(f"\n✅ Latent ODE done in {(time.time()-t0)/60:.1f}min | best={best_loss:.4f}")
 
 # %% [markdown]
-# ## Cell 6: Save Final Model + Point-to-Point Generation Test
+# ## Cell 6: Save Final Model + Test Point-to-Point Generation
 
 # %%
-# Save combined checkpoint
-final_checkpoint = {
-    'config': {
-        'siren_param_count': weight_matrix.shape[1],
-        'hidden_features': 64, 'hidden_layers': 3,
-        'embedding_dim': 256, 'num_embeddings': 512,
-        'latent_dim': 64, 'rec_hidden_dim': 256, 'gen_hidden_dim': 512,
-        'input_dim': 258, 'output_dim': 256,
-        'seq_len': SEQ_LEN,
-        'w_mean': w_mean.tolist(), 'w_std': w_std.tolist(),
-    },
-    'vqvae_state_dict': vqvae.state_dict(),
-    'latent_ode_state_dict': latent_ode.state_dict(),
-}
-torch.save(final_checkpoint, 'trajectory_model_final.pt')
-upload_file(path_or_fileobj='trajectory_model_final.pt', path_in_repo='trajectory_model_final.pt', repo_id=REPO_ID, token=HF_TOKEN)
-print(f"💾 Final model uploaded to HuggingFace: {REPO_ID}/trajectory_model_final.pt")
-
-# %%
-# Test: Point-to-point trajectory generation with DIVERSITY check
 import matplotlib.pyplot as plt
 from trajectory_gen.models.siren import SIREN
 
-latent_ode.eval()
-vqvae.eval()
+final = {
+    'config': {'siren_param_count': weight_matrix.shape[1], 'hidden_features': 64,
+        'hidden_layers': 3, 'embedding_dim': 256, 'num_embeddings': 512,
+        'latent_dim': 64, 'rec_hidden_dim': 256, 'gen_hidden_dim': 512,
+        'input_dim': 258, 'output_dim': 256, 'seq_len': SEQ_LEN,
+        'w_mean': w_mean.tolist(), 'w_std': w_std.tolist()},
+    'vqvae_state_dict': vqvae.state_dict(),
+    'latent_ode_state_dict': latent_ode.state_dict(),
+}
+torch.save(final, 'trajectory_model_final.pt')
+upload_file(path_or_fileobj='trajectory_model_final.pt', path_in_repo='trajectory_model_final.pt', repo_id=REPO_ID)
+print(f"💾 Final model → HuggingFace: {REPO_ID}")
 
-# Test 3 different start→end pairs, 4 samples each (to prove diversity)
-test_routes = [
-    ((100, 200), (800, 600), "Short diagonal"),
-    ((50, 500), (1800, 100), "Long diagonal"),
-    ((900, 50), (900, 900), "Vertical"),
-]
-
-fig, axes = plt.subplots(len(test_routes), 4, figsize=(20, 5*len(test_routes)))
+# Test generation
+latent_ode.eval(); vqvae.eval()
+routes = [((100,200),(800,600),"Short diagonal"),((50,500),(1800,100),"Long diagonal"),((900,50),(900,900),"Vertical")]
+fig, axes = plt.subplots(3, 4, figsize=(20, 15))
 
 with torch.no_grad():
-    for row, (start, end, label) in enumerate(test_routes):
-        # Compute displacement condition
-        dx = (end[0] - start[0]) / 2000.0
-        dy = (end[1] - start[1]) / 2000.0
-        cond = torch.tensor([[dx, dy]], dtype=torch.float32, device=device)
-
+    for row, (start, end, label) in enumerate(routes):
         for col in range(4):
-            # Sample different z0 each time → different trajectory
             z0 = torch.randn(1, 64, device=device)
-            t_gen = torch.linspace(0, 1, SEQ_LEN, device=device)
-            z_traj = latent_ode.decode_latent_trajectory(z0, t_gen)  # (1, SEQ_LEN, 64)
-
-            # Decode latent to embedding space (output_dim=256)
-            B, S, L = z_traj.shape
-            embs = latent_ode.decoder(z_traj.reshape(-1, L)).reshape(B, S, -1)
-            embs = embs.squeeze(0)  # (SEQ_LEN, 256)
-
-            # Quantize to codebook entries
-            _, _, indices, _ = vqvae.vq(embs)
-            siren_weights_batch = vqvae.decode_indices(indices)
-
-            # Denormalize weights
-            w_mean_t = torch.tensor(w_mean, dtype=torch.float32, device=device)
-            w_std_t = torch.tensor(w_std, dtype=torch.float32, device=device)
-            siren_weights_batch = siren_weights_batch * w_std_t + w_mean_t
-
-            # Decode each SIREN primitive
-            all_x, all_y = [], []
+            tg = torch.linspace(0, 1, SEQ_LEN, device=device)
+            zt = latent_ode.decode_latent_trajectory(z0, tg)
+            B, S, L = zt.shape
+            embs = latent_ode.decoder(zt.reshape(-1, L)).reshape(B, S, -1).squeeze(0)
+            _, _, idx, _ = vqvae.vq(embs)
+            sw = vqvae.decode_indices(idx)
+            wm = torch.tensor(w_mean, dtype=torch.float32, device=device)
+            ws = torch.tensor(w_std, dtype=torch.float32, device=device)
+            sw = sw * ws + wm
+            ax, ay = [], []
             for i in range(SEQ_LEN):
-                siren = SIREN(in_features=1, hidden_features=64, hidden_layers=3, out_features=2).to(device)
-                siren.set_weight_vector(siren_weights_batch[i])
-                _, x_pts, y_pts = siren.compute_trajectory(num_points=50)
-                all_x.extend(x_pts)
-                all_y.extend(y_pts)
+                s = SIREN(in_features=1, hidden_features=64, hidden_layers=3, out_features=2).to(device)
+                s.set_weight_vector(sw[i])
+                _, xp, yp = s.compute_trajectory(num_points=50)
+                ax.extend(xp); ay.extend(yp)
+            rx, ry = np.array(ax), np.array(ay)
+            alpha = np.linspace(0, 1, len(rx))
+            bx = start[0] + alpha*(end[0]-start[0])
+            by = start[1] + alpha*(end[1]-start[1])
+            d = max(np.sqrt((end[0]-start[0])**2+(end[1]-start[1])**2)*0.3, 10)
+            f = np.sin(np.pi*alpha)
+            axes[row,col].plot(bx+rx*d*f, by+ry*d*f, '-', lw=1.2)
+            axes[row,col].plot(*start, 'go', ms=10)
+            axes[row,col].plot(*end, 'rs', ms=10)
+            axes[row,col].set_title(f'{label} #{col+1}')
+            axes[row,col].set_aspect('equal'); axes[row,col].grid(True, alpha=0.3)
 
-            raw_x, raw_y = np.array(all_x), np.array(all_y)
-
-            # Affine warp to hit start/end exactly
-            alpha = np.linspace(0, 1, len(raw_x))
-            base_x = start[0] + alpha * (end[0] - start[0])
-            base_y = start[1] + alpha * (end[1] - start[1])
-            dist = np.sqrt((end[0]-start[0])**2 + (end[1]-start[1])**2)
-            scale = max(dist * 0.3, 10.0)
-            fade = np.sin(np.pi * alpha)
-            final_x = base_x + raw_x * scale * fade
-            final_y = base_y + raw_y * scale * fade
-
-            ax = axes[row, col] if len(test_routes) > 1 else axes[col]
-            ax.plot(final_x, final_y, '-', linewidth=1.2, alpha=0.8)
-            ax.plot(*start, 'go', markersize=10, label='Start')
-            ax.plot(*end, 'rs', markersize=10, label='End')
-            ax.set_title(f'{label} — Sample {col+1}')
-            ax.set_aspect('equal')
-            ax.grid(True, alpha=0.3)
-            if col == 0:
-                ax.legend(fontsize=8)
-
-plt.suptitle('Point-to-Point Trajectories (different z₀ = different paths)', fontsize=14)
-plt.tight_layout()
-plt.savefig('generated_samples.png', dpi=150, bbox_inches='tight')
-plt.show()
-upload_file(path_or_fileobj='generated_samples.png', path_in_repo='generated_samples.png', repo_id=REPO_ID, token=HF_TOKEN)
-
-# Diversity check: compute variance across samples
-print("\n📊 DIVERSITY CHECK:")
-print("If all 4 columns look DIFFERENT for each row → model is diverse ✅")
-print("If all 4 columns look the SAME → model collapsed ❌ (needs more training)")
-
+plt.suptitle('Point-to-Point Trajectories (diverse z₀)', fontsize=14)
+plt.tight_layout(); plt.savefig('generated_samples.png', dpi=150, bbox_inches='tight'); plt.show()
+upload_file(path_or_fileobj='generated_samples.png', path_in_repo='generated_samples.png', repo_id=REPO_ID)
 print("\n🎉 PIPELINE COMPLETE!")
-print(f"   Model: https://huggingface.co/{REPO_ID}")
-print(f"   Files: trajectory_model_final.pt, vqvae_checkpoint.pt, latent_ode_checkpoint.pt")
