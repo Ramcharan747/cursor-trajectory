@@ -289,7 +289,7 @@ for epoch in range(NUM_EPOCHS):
         torch.save({'epoch': epoch, 'model_state_dict': vqvae.state_dict(),
             'config': {'input_dim': weight_matrix.shape[1], 'hidden_dim': 2048,
                 'embedding_dim': 256, 'num_embeddings': 512,
-                'w_mean': w_mean.tolist(), 'w_std': w_std.tolist()}},
+                'w_mean': w_mean.flatten().tolist(), 'w_std': w_std.flatten().tolist()}},
             'vqvae_checkpoint.pt')
     if (epoch+1) % 50 == 0:
         upload_file(path_or_fileobj='vqvae_checkpoint.pt', path_in_repo='vqvae_checkpoint.pt', repo_id=REPO_ID)
@@ -402,7 +402,7 @@ final = {
         'hidden_layers': 3, 'embedding_dim': 256, 'num_embeddings': 512,
         'latent_dim': 64, 'rec_hidden_dim': 256, 'gen_hidden_dim': 512,
         'input_dim': 258, 'output_dim': 256, 'seq_len': SEQ_LEN,
-        'w_mean': w_mean.tolist(), 'w_std': w_std.tolist()},
+        'w_mean': w_mean.flatten().tolist(), 'w_std': w_std.flatten().tolist()},
     'vqvae_state_dict': vqvae.state_dict(),
     'latent_ode_state_dict': latent_ode.state_dict(),
 }
