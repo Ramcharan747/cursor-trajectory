@@ -237,7 +237,9 @@ vqvae = VQVAE(input_dim=weight_matrix.shape[1], hidden_dim=2048,
 with torch.no_grad():
     sample = weight_norm_tensor[np.random.choice(len(weight_norm_tensor), 512, replace=False)].to(device)
     z_e = vqvae.encoder(sample)
-    vqvae.vq.embedding.data.copy_(z_e)
+    vqvae.vq.embedding.weight.data.copy_(z_e)
+    vqvae.vq._ema_w.data.copy_(z_e)
+    vqvae.vq._ema_cluster_size.data.fill_(1.0)
 print("✅ Codebook initialized from data")
 
 optimizer = torch.optim.Adam(vqvae.parameters(), lr=1e-3)
@@ -275,7 +277,9 @@ for epoch in range(NUM_EPOCHS):
             dead = (usage == 0).nonzero().squeeze(-1)
             if len(dead) > 0:
                 ri = torch.randint(0, len(ze), (len(dead),))
-                vqvae.vq.embedding.data[dead] = ze[ri]
+                vqvae.vq.embedding.weight.data[dead] = ze[ri]
+                vqvae.vq._ema_w.data[dead] = ze[ri]
+                vqvae.vq._ema_cluster_size.data[dead] = 1.0
                 print(f"    ↻ Reset {len(dead)} dead codes")
         print(f"  Epoch {epoch+1:3d}/100 | recon={ar:.6f} vq={av:.6f} perp={ap:.1f}/512 | {(time.time()-t0)/60:.1f}min")
 
