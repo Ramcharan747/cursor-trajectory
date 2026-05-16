@@ -216,11 +216,17 @@ from trajectory_gen.models.vqvae import VQVAE
 weight_matrix = np.load('data/siren_weights.npy')
 print(f"VQ-VAE: {weight_matrix.shape[0]:,} vectors × dim {weight_matrix.shape[1]}")
 
-w_mean = weight_matrix.mean(axis=0)
-w_std = weight_matrix.std(axis=0) + 1e-8
-weight_norm = (weight_matrix - w_mean) / w_std
+w_mean = weight_matrix.mean(axis=0, keepdims=True)
+w_std = weight_matrix.std(axis=0, keepdims=True) + 1e-8
 
-dataset = TensorDataset(torch.tensor(weight_norm, dtype=torch.float32))
+# CRITICAL RAM FIX: Normalize IN-PLACE to save 8.5 GB of RAM
+weight_matrix -= w_mean
+weight_matrix /= w_std
+
+# CRITICAL RAM FIX: torch.from_numpy shares memory, torch.tensor copies!
+weight_norm_tensor = torch.from_numpy(weight_matrix)
+
+dataset = TensorDataset(weight_norm_tensor)
 loader = DataLoader(dataset, batch_size=1024, shuffle=True, num_workers=2, pin_memory=True)
 
 vqvae = VQVAE(input_dim=weight_matrix.shape[1], hidden_dim=2048,
@@ -228,7 +234,7 @@ vqvae = VQVAE(input_dim=weight_matrix.shape[1], hidden_dim=2048,
 
 # CRITICAL: Initialize codebook from encoder outputs to prevent collapse
 with torch.no_grad():
-    sample = torch.tensor(weight_norm[np.random.choice(len(weight_norm), 512, replace=False)], dtype=torch.float32).to(device)
+    sample = weight_norm_tensor[np.random.choice(len(weight_norm_tensor), 512, replace=False)].to(device)
     z_e = vqvae.encoder(sample)
     vqvae.vq.embedding.data.copy_(z_e)
 print("✅ Codebook initialized from data")
@@ -260,7 +266,7 @@ for epoch in range(NUM_EPOCHS):
     # Reset dead codebook entries every 10 epochs
     if (epoch+1) % 10 == 0:
         with torch.no_grad():
-            samp = torch.tensor(weight_norm[np.random.choice(len(weight_norm), 4096)], dtype=torch.float32).to(device)
+            samp = weight_norm_tensor[np.random.choice(len(weight_norm_tensor), 4096)].to(device)
             ze = vqvae.encoder(samp)
             usage = torch.zeros(512, device=device)
             _, _, idx, _ = vqvae.vq(ze)
@@ -296,7 +302,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from trajectory_gen.models.latent_ode import LatentODE
 
 vqvae.eval()
-weight_tensor = torch.tensor(weight_norm, dtype=torch.float32)
+# CRITICAL RAM FIX: Use the existing weight_norm_tensor instead of making another copy
+weight_tensor = weight_norm_tensor.to(device)
 
 batch_sz = 4096
 all_emb = []
