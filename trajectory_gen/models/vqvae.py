@@ -226,11 +226,11 @@ class VQVAE(nn.Module):
         # Scaled architecture for VRAM utilization (~85M params)
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1),
             nn.Linear(hidden_dim, hidden_dim // 2),  # 2048 → 1024
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1),
             nn.Linear(hidden_dim // 2, hidden_dim // 4),  # 1024 → 512
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1),
             nn.Linear(hidden_dim // 4, embedding_dim),  # 512 → 256
         )
 
@@ -242,15 +242,13 @@ class VQVAE(nn.Module):
             decay=ema_decay,
         )
 
-        # Decoder: quantized embedding → reconstructed SIREN weights
-        # Mirror of encoder architecture
         self.decoder = nn.Sequential(
             nn.Linear(embedding_dim, hidden_dim // 4),  # 256 → 512
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1),
             nn.Linear(hidden_dim // 4, hidden_dim // 2),  # 512 → 1024
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1),
             nn.Linear(hidden_dim // 2, hidden_dim),  # 1024 → 2048
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1),
             nn.Linear(hidden_dim, input_dim),  # 2048 → 12738
         )
 

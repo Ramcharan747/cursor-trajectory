@@ -242,9 +242,8 @@ with torch.no_grad():
     vqvae.vq._ema_cluster_size.data.fill_(1.0)
 print("✅ Codebook initialized from data")
 
-optimizer = torch.optim.Adam(vqvae.parameters(), lr=1e-3)
+optimizer = torch.optim.Adam(vqvae.parameters(), lr=3e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
-scaler = torch.amp.GradScaler('cuda')
 
 NUM_EPOCHS = 100
 best_loss = float('inf')
@@ -256,12 +255,15 @@ for epoch in range(NUM_EPOCHS):
     for (batch,) in loader:
         batch = batch.to(device)
         optimizer.zero_grad()
-        with torch.amp.autocast('cuda'):
-            x_rec, vq_loss, indices, perp = vqvae(batch)
-            recon = F.mse_loss(x_rec, batch)
-            loss = recon + vq_loss
-        scaler.scale(loss).backward()
-        scaler.step(optimizer); scaler.update()
+        
+        # Removed autocast to prevent fp16 underflow/NaNs causing dead networks
+        x_rec, vq_loss, indices, perp = vqvae(batch)
+        recon = F.mse_loss(x_rec, batch)
+        loss = recon + vq_loss
+        
+        loss.backward()
+        optimizer.step()
+        
         ep_r += recon.item(); ep_v += vq_loss.item(); ep_p += perp.item(); nb += 1
     scheduler.step()
     ar, av, ap = ep_r/nb, ep_v/nb, ep_p/nb
