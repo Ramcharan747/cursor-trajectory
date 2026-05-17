@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -205,3 +206,47 @@ class TrajectoryDiffusion(nn.Module):
             x = (1 / torch.sqrt(alpha)) * (x - ((1 - alpha) / torch.sqrt(1 - alpha_cumprod)) * predicted_noise) + torch.sqrt(beta) * noise
             
         return x
+
+    @staticmethod
+    def warp_trajectory(base_traj, new_start, new_end):
+        """
+        Takes a generated trajectory (list of (x,y) tuples) and instantly warps it 
+        to fit a new start and end point using affine translation and scaling.
+        This provides O(1) zero-latency path generation at runtime without running the NN.
+        """
+        traj = np.array(base_traj, dtype=np.float32)
+        n = len(traj)
+        
+        # Original deltas
+        old_dx = traj[-1, 0] - traj[0, 0]
+        old_dy = traj[-1, 1] - traj[0, 1]
+        
+        # New deltas
+        new_dx = new_end[0] - new_start[0]
+        new_dy = new_end[1] - new_start[1]
+        
+        # Prevent division by zero if original path was a flat dot
+        if abs(old_dx) < 1e-5: old_dx = 1.0
+        if abs(old_dy) < 1e-5: old_dy = 1.0
+        
+        scale_x = new_dx / old_dx
+        scale_y = new_dy / old_dy
+        
+        # Center trajectory at origin
+        origin_x, origin_y = traj[0, 0], traj[0, 1]
+        traj[:, 0] -= origin_x
+        traj[:, 1] -= origin_y
+        
+        # Scale
+        traj[:, 0] *= scale_x
+        traj[:, 1] *= scale_y
+        
+        # Translate to new start
+        traj[:, 0] += new_start[0]
+        traj[:, 1] += new_start[1]
+        
+        # Force exact endpoints just in case of float drift
+        traj[0] = new_start
+        traj[-1] = new_end
+        
+        return [(float(traj[i, 0]), float(traj[i, 1])) for i in range(n)]
