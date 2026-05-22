@@ -1,6 +1,6 @@
 [package]
 name = "cursor_capture"
-version = "0.1.0"
+version = "2.0.1"
 edition = "2021"
 description = "Silent cursor movement recorder for trajectory research"
 

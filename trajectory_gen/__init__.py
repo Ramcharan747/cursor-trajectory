@@ -13,4 +13,4 @@ Based on:
     - Latent ODE (Rubanova et al., 2019): Irregularly-sampled time series
 """
 
-__version__ = "0.1.0"
+__version__ = "2.0.1"
