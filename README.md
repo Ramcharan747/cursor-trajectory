@@ -19,23 +19,6 @@
 
 ---
 
-## 📖 Table of Contents
-- [🎯 What is it?](#-what-is-it)
-- [⚡ Why do we need this? (The Science of Anti-Bot)](#-why-do-we-need-this-the-science-of-anti-bot)
-- [🏗️ How It Works (End-to-End Pipeline)](#️-how-it-works-end-to-end-pipeline)
-- [🧠 Generative Models Deep-Dive](#-generative-models-deep-dive)
-  - [1. Latent Ordinary Differential Equations](#1-latent-ordinary-differential-equations)
-  - [2. Conditional Variational Autoencoders](#2-conditional-variational-autoencoders)
-  - [3. Denoising Diffusion Probabilistic Models (DDPM)](#3-denoising-diffusion-probabilistic-models-ddpm)
-- [📊 Model Comparison Matrix](#-model-comparison-matrix)
-- [⚙️ Setup & Installation](#️-setup--installation)
-  - [1. Build the Rust Capture Daemon](#1-build-the-rust-capture-daemon)
-  - [2. Python Environment Setup](#2-python-environment-setup)
-  - [3. Training & Trajectory Generation](#3-training--trajectory-generation)
-- [🔌 Sister Project: UltraSearch Integration](#-sister-project-ultrasearch-integration)
-- [🛡️ Ethical Use & Disclaimer](#️-ethical-use--disclaimer)
-
----
 
 ## 🎯 What is it?
 
