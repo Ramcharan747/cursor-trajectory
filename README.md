@@ -49,6 +49,13 @@ These generated paths are engineered to bypass advanced **behavioral bot detecti
 
 ---
 
+## 🎯 Visual Proof: Bot vs Neural ODE Mimicry
+
+![Trajectory Comparison](assets/trajectory_comparison.gif)
+
+*Standard automated paths are easily flagged by heuristic bot-detection mechanisms (Cloudflare, Datadome, Kasada). Our Neural ODE model mathematically generates human-like acceleration curves, hesitation, and natural jitter.*
+
+
 ## ⚡ Why do we need this? (The Science of Anti-Bot)
 
 Web security has evolved from static browser fingerprinting (checking WebGL, Canvas, User-Agents) to **Dynamic Behavioral Analysis**. When automation libraries move the mouse, their paths are dead giveaways to security scripts:
@@ -189,9 +196,3 @@ func SolvedChallenge(ctx context.Context) {
 ## 🛡️ Ethical Use & Disclaimer
 This repository is created solely for **educational, research, and security auditing purposes**. It is designed to help researchers study human-computer interaction and assist developers in building accessibility tools or auditing their own systems against behavioral analysis. The authors do not condone or support the use of this software for malicious automated actions, credential stuffing, or violating the terms of service of any website.
 
-
-## 🎯 Visual Proof: Bot vs Neural ODE Mimicry
-
-![Trajectory Comparison](assets/trajectory_comparison.gif)
-
-*Standard automated paths are easily flagged by heuristic bot-detection mechanisms (Cloudflare, Datadome, Kasada). Our Neural ODE model mathematically generates human-like acceleration curves, hesitation, and natural jitter.*
